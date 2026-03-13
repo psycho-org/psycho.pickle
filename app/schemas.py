@@ -1,6 +1,7 @@
 from datetime import datetime
+from typing import ClassVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class JobCreate(BaseModel):
@@ -15,4 +16,4 @@ class JobResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    model_config = {"from_attributes": True}
+    model_config: ClassVar[ConfigDict] = ConfigDict(from_attributes=True)
