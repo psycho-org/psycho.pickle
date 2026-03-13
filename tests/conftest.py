@@ -1,3 +1,3 @@
 from dotenv import load_dotenv
 
-load_dotenv(".env.test", override=True)
+_ = load_dotenv(".env.test", override=True)
