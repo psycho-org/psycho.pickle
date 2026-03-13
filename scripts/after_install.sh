@@ -4,7 +4,7 @@ set -e
 APP_DIR="/home/ubuntu/app"
 ENV_FILE="${APP_DIR}/.env"
 REGION="ap-northeast-2"
-SSM_PREFIX="/psycho/prod/relay"
+SSM_PREFIX="/psycho/prod"
 
 echo "========================================"
 echo " AfterInstall: $(date)"
@@ -22,7 +22,7 @@ get_param() {
 echo "Loading environment variables from SSM..."
 
 cat > ${ENV_FILE} <<EOF
-DB_HOST=$(get_param db-url)
+DB_HOST=$(get_param db-host)
 DB_PORT=$(get_param db-port)
 DB_NAME=$(get_param db-name)
 DB_USERNAME=$(get_param db-username)
