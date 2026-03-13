@@ -1,5 +1,7 @@
-import os
-
 from openai import OpenAI
 
-client = OpenAI(webhook_secret=os.environ["OPENAI_WEBHOOK_SECRET"])
+from app.config import get_settings
+
+
+def get_client() -> OpenAI:
+    return OpenAI(webhook_secret=get_settings().openai_webhook_secret)

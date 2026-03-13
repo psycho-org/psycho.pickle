@@ -1,13 +1,14 @@
 from fastapi import APIRouter, Request, Response
 from openai import InvalidWebhookSignatureError
 
-from app.services.llm import client
+from app.services.llm import get_client
 
 router = APIRouter()
 
 
 @router.post("/webhook")
 async def webhook(request: Request):
+    client = get_client()
     try:
         body = await request.body()
         event = client.webhooks.unwrap(body, request.headers)
