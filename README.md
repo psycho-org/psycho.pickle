@@ -16,8 +16,8 @@ Business Server → Relay (psycho.pickle) → LLM API
 
 ## Architecture
 
-2-layer (Router → Service) 구조를 사용한다.
-별도의 Repository/Persistence 레이어는 두지 않는다. SQLAlchemy가 이미 DB 추상화를 제공하고, 테이블 수가 적어 Service에서 직접 세션을 다루는 것으로 충분하다.
+Uses a 2-layer (Router → Service) architecture.
+No separate Repository/Persistence layer — SQLAlchemy already provides DB abstraction, and the table count is small enough for Services to handle sessions directly.
 
 ``` plain text
 Router (Controller)  →  Service (Business Logic)  →  외부 의존성
@@ -60,7 +60,7 @@ app/
 # Install dependencies
 uv sync
 
-# Install pre-commit hooks (커밋 시 자동 lint + format)
+# Install pre-commit hooks (auto lint + format on commit)
 uv run pre-commit install
 
 # Run locally
