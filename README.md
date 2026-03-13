@@ -16,18 +16,27 @@ Business Server → Relay (psycho.pickle) → LLM API
 
 ## Architecture
 
+2-layer (Router → Service) 구조를 사용한다.
+별도의 Repository/Persistence 레이어는 두지 않는다. SQLAlchemy가 이미 DB 추상화를 제공하고, 테이블 수가 적어 Service에서 직접 세션을 다루는 것으로 충분하다.
+
+``` plain text
+Router (Controller)  →  Service (Business Logic)  →  외부 의존성
+routers/job          →  services/job              →  services/llm (OpenAI)
+                                                   →  database (DB)
+```
+
 ``` plain text
 app/
-├── main.py          # FastAPI app, router registration, lifespan
+├── main.py          # FastAPI app, router registration
 ├── database.py      # DB engine, session, Base
 ├── models.py        # SQLAlchemy table mappings
+├── schemas.py       # Pydantic request/response models
 ├── routers/
 │   ├── health.py    # /health
-│   └── jobs.py      # Job request endpoints
-├── services/
-│   ├── llm.py       # OpenAI API calls, callback handling
-│   └── job.py       # Job state management (DB read/write)
-└── schemas.py       # Pydantic request/response models
+│   └── job.py       # Job request, webhook callback endpoints
+└── services/
+    ├── llm.py       # OpenAI API client
+    └── job.py       # Job business logic + DB handling
 ```
 
 ## Tech Stack
@@ -50,6 +59,9 @@ app/
 ```bash
 # Install dependencies
 uv sync
+
+# Install pre-commit hooks (커밋 시 자동 lint + format)
+uv run pre-commit install
 
 # Run locally
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

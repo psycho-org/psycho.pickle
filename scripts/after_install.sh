@@ -27,6 +27,7 @@ DB_PORT=$(get_param db-port)
 DB_NAME=$(get_param db-name)
 DB_USERNAME=$(get_param db-username)
 DB_PASSWORD=$(get_param db-password)
+OPENAI_WEBHOOK_SECRET=$(get_param openai-webhook-secret)
 EOF
 
 chmod 600 ${ENV_FILE}
