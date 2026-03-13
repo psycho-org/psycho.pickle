@@ -69,5 +69,5 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 ## Deployment
 
-Triggered automatically via GitHub Actions on push to `main`.
+Triggered automatically via GitHub Actions on push to `master`.
 CodeDeploy performs an in-place deployment across both AZ-B and AZ-D instances simultaneously.
