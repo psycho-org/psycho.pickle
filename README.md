@@ -1,17 +1,18 @@
 # psycho.pickle
 
 Relay server for asynchronous LLM API processing.
+Consumes inbound jobs from AWS SQS and can publish completion notifications back to AWS SQS or HTTP.
 
 ## Overview
 
 Business server forwards job requests to this relay server. The relay handles all LLM API egress, awaits callbacks, and persists results to the database. The business server is notified upon completion.
 
 ```plain text
-Business Server → Relay (psycho.pickle) → LLM API
-                            ↓
-                           DB
-                            ↓
-                    Business Server (notification)
+Business Server → Request SQS → Relay (psycho.pickle) → LLM API
+                                  ↓
+                                 DB
+                                  ↓
+                    Result SQS or Business Server (notification)
 ```
 
 ## Architecture
@@ -63,9 +64,21 @@ uv sync
 # Install pre-commit hooks (auto lint + format on commit)
 uv run pre-commit install
 
+# Create local profile
+cp .env.local.example .env.local
+
 # Run locally
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+- Local development reads `.env.local`.
+- Runtime config is loaded from `.env`, then overridden by `.env.local` when present.
+- Tests read `.env.test`.
+- Production does not depend on `.env.local`; CodeDeploy injects runtime environment variables from SSM.
+- Queue config:
+  - `SQS_LISTENER_QUEUE_URL` or legacy `SQS_QUEUE_URL`: inbound job queue
+  - `BUSINESS_NOTIFY_SQS_QUEUE_URL`: outbound result queue
+  - `BUSINESS_NOTIFY_URL`: optional HTTP fallback for result notifications
 
 ## Deployment
 

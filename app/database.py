@@ -6,15 +6,11 @@ from sqlalchemy.orm import DeclarativeBase
 from app.config import get_settings
 
 
-def _build_database_url() -> str:
-    s = get_settings()
-    return (
-        f"postgresql+asyncpg://{s.db_username}:{s.db_password}"
-        f"@{s.db_host}:{s.db_port}/{s.db_name}"
-    )
-
-
-engine = create_async_engine(_build_database_url(), echo=False)
+engine = create_async_engine(
+    get_settings().resolved_database_url,
+    echo=False,
+    pool_pre_ping=True,
+)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 
@@ -25,3 +21,12 @@ class Base(DeclarativeBase):
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with AsyncSessionLocal() as session:
         yield session
+
+
+async def init_database() -> None:
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
+async def close_database() -> None:
+    await engine.dispose()
