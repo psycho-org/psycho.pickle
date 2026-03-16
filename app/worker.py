@@ -200,7 +200,9 @@ class BackgroundWorkerManager:
             AttributeNames=["All"],
             MessageAttributeNames=["All"],
         )
-        return response.get("Messages", [])
+        messages = response.get("Messages", [])
+        print(f"📥 Received {len(messages)} messages from SQS queue")
+        return messages
 
     async def _delete_message(self, receipt_handle: str) -> None:
         queue_url = self.settings.resolved_sqs_listener_queue_url

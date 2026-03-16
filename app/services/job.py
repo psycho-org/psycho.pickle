@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-from collections.abc import Sequence
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -22,9 +21,9 @@ from app.constants import (
     OPENAI_STATE_INCOMPLETE,
     OPENAI_STATE_PENDING,
     OPENAI_STATE_SUBMITTED,
-    POSTPROCESS_STATE_FETCH_FAILED,
-    POSTPROCESS_STATE_FETCH_IN_PROGRESS,
-    POSTPROCESS_STATE_FETCH_PENDING,
+    # POSTPROCESS_STATE_FETCH_FAILED,
+    # POSTPROCESS_STATE_FETCH_IN_PROGRESS,
+    # POSTPROCESS_STATE_FETCH_PENDING,
     POSTPROCESS_STATE_NOT_REQUIRED,
     POSTPROCESS_STATE_NOT_STARTED,
     POSTPROCESS_STATE_NOTIFY_FAILED,
@@ -146,18 +145,18 @@ def compute_next_retry(attempt: int) -> datetime:
     return utcnow() + timedelta(seconds=delay_seconds)
 
 
-def result_fetch_status_for_job(job: Job) -> str:
-    if job.result_fetched_at is not None or job.result_payload is not None:
-        return "succeeded"
-    if job.openai_state != OPENAI_STATE_COMPLETED:
-        return "skipped"
-    if job.postprocess_state in {
-        POSTPROCESS_STATE_FETCH_PENDING,
-        POSTPROCESS_STATE_FETCH_IN_PROGRESS,
-        POSTPROCESS_STATE_FETCH_FAILED,
-    }:
-        return "pending"
-    return "not_started"
+# def result_fetch_status_for_job(job: Job) -> str:
+#     if job.result_fetched_at is not None or job.result_payload is not None:
+#         return "succeeded"
+#     if job.openai_state != OPENAI_STATE_COMPLETED:
+#         return "skipped"
+#     if job.postprocess_state in {
+#         POSTPROCESS_STATE_FETCH_PENDING,
+#         POSTPROCESS_STATE_FETCH_IN_PROGRESS,
+#         POSTPROCESS_STATE_FETCH_FAILED,
+#     }:
+#         return "pending"
+#     return "not_started"
 
 
 def build_notify_error(job: Job) -> dict[str, Any] | None:
@@ -183,7 +182,7 @@ def build_notify_payload(job: Job) -> BusinessNotifyPayload:
         openai_response_id=job.openai_response_id,
         openai_state=job.openai_state,
         postprocess_state=job.postprocess_state,
-        result_fetch_status=result_fetch_status_for_job(job),
+        # result_fetch_status=result_fetch_status_for_job(job),
         result=job.result_payload,
         error=build_notify_error(job),
         occurred_at=utcnow(),
@@ -267,7 +266,8 @@ def _apply_openai_terminal_state(
     job.openai_error_payload = error_payload
 
     if openai_state == OPENAI_STATE_COMPLETED:
-        job.postprocess_state = POSTPROCESS_STATE_FETCH_PENDING
+        # job.postprocess_state = POSTPROCESS_STATE_FETCH_PENDING
+        job.postprocess_state = POSTPROCESS_STATE_NOTIFY_PENDING
         job.next_retry_at = utcnow()
         return
 
@@ -581,6 +581,7 @@ async def _claim_recovery_jobs(limit: int) -> list[int]:
             return [job.id for job in jobs]
 
 
+"""
 async def _fetch_result_payload(
     job_id: int,
     *,
@@ -669,6 +670,7 @@ async def _fetch_result_payload(
                     },
                 )
             )
+"""
 
 
 async def _notify_job(
@@ -679,8 +681,13 @@ async def _notify_job(
 ) -> None:
     async with AsyncSessionLocal() as session:
         job = await session.get(Job, job_id)
+        print(f"🔔 Notifying downstream for job_id={job_id}")
     if job is None:
+        print(f"⚠️ Job not found for job_id={job_id}")
         return
+    print(
+        f"📋 Job details: openai_state={job.openai_state} postprocess_state={job.postprocess_state} notify_attempts={job.notify_attempts}"
+    )
 
     settings = get_settings()
     transport, target = resolve_notify_target(settings)
@@ -706,6 +713,7 @@ async def _notify_job(
 
     try:
         if transport == "sqs":
+            print(f"📤 Sending completion notification to SQS for job_id={job_id}")
             request = build_notify_sqs_request(
                 job=job,
                 queue_url=target,
@@ -727,6 +735,10 @@ async def _notify_job(
                 "payload": notify_payload,
                 "message_id": response.get("MessageId"),
             }
+            logger.info(
+                "✅ Successfully sent completion notification to SQS for job_id={}",
+                job_id,
+            )
         else:
             headers: dict[str, str] = {}
             if (
@@ -752,6 +764,11 @@ async def _notify_job(
                     await client.aclose()
             success_payload = {**destination_payload, "payload": notify_payload}
     except Exception as exc:
+        logger.error(
+            "❌ Failed to send completion notification to SQS for job_id={}",
+            job_id,
+            exc_info=exc,
+        )
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 persisted_job = await session.get(Job, job_id)
@@ -806,31 +823,34 @@ async def claim_due_postprocess_work(limit: int) -> list[tuple[str, int]]:
     if limit <= 0:
         return []
 
-    fetch_job_ids = await _claim_jobs_for_stage(
+    # fetch_job_ids = await _claim_jobs_for_stage(
+    #     eligible_states=(
+    #         POSTPROCESS_STATE_FETCH_PENDING,
+    #         POSTPROCESS_STATE_FETCH_FAILED,
+    #         POSTPROCESS_STATE_FETCH_IN_PROGRESS,
+    #     ),
+    #     in_progress_state=POSTPROCESS_STATE_FETCH_IN_PROGRESS,
+    #     limit=limit,
+    # )
+    # remaining = limit - len(fetch_job_ids)
+    # notify_job_ids: Sequence[int] = []
+    # if remaining > 0:
+    notify_job_ids = await _claim_jobs_for_stage(
         eligible_states=(
-            POSTPROCESS_STATE_FETCH_PENDING,
-            POSTPROCESS_STATE_FETCH_FAILED,
-            POSTPROCESS_STATE_FETCH_IN_PROGRESS,
+            POSTPROCESS_STATE_NOTIFY_PENDING,
+            POSTPROCESS_STATE_NOTIFY_FAILED,
+            POSTPROCESS_STATE_NOTIFY_IN_PROGRESS,
         ),
-        in_progress_state=POSTPROCESS_STATE_FETCH_IN_PROGRESS,
+        in_progress_state=POSTPROCESS_STATE_NOTIFY_IN_PROGRESS,
+        # limit=remaining,
         limit=limit,
     )
-    remaining = limit - len(fetch_job_ids)
-    notify_job_ids: Sequence[int] = []
-    if remaining > 0:
-        notify_job_ids = await _claim_jobs_for_stage(
-            eligible_states=(
-                POSTPROCESS_STATE_NOTIFY_PENDING,
-                POSTPROCESS_STATE_NOTIFY_FAILED,
-                POSTPROCESS_STATE_NOTIFY_IN_PROGRESS,
-            ),
-            in_progress_state=POSTPROCESS_STATE_NOTIFY_IN_PROGRESS,
-            limit=remaining,
-        )
 
-    return [("fetch", job_id) for job_id in fetch_job_ids] + [
-        ("notify", job_id) for job_id in notify_job_ids
-    ]
+    # return [("fetch", job_id) for job_id in fetch_job_ids] + [
+    #     ("notify", job_id) for job_id in notify_job_ids
+    # ]
+
+    return [("notify", job_id) for job_id in notify_job_ids]
 
 
 async def process_postprocess_work(
@@ -840,10 +860,12 @@ async def process_postprocess_work(
     downstream_client: httpx.AsyncClient | None = None,
     sqs_client: Any | None = None,
 ) -> None:
-    if work_kind == "fetch":
-        await _fetch_result_payload(job_id, downstream_client=downstream_client)
-        return
+    # if work_kind == "fetch":
+    #     print(f"📥 Processing result fetch work for job_id={job_id}")
+    #     await _fetch_result_payload(job_id, downstream_client=downstream_client)
+    #     return
     if work_kind == "notify":
+        print(f"🚀 Processing notify work for job_id={job_id}")
         await _notify_job(
             job_id,
             downstream_client=downstream_client,
