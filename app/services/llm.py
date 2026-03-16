@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from typing import Any
 
+from langchain_openai import ChatOpenAI
 from openai import AsyncOpenAI, OpenAI
 
 from app.config import get_settings
@@ -24,6 +25,16 @@ def get_async_client() -> AsyncOpenAI:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY must be configured for the worker.")
     return AsyncOpenAI(**_build_client_kwargs())
+
+
+def get_langchain_client() -> ChatOpenAI:
+    settings = get_settings()
+    if not settings.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY must be configured for the worker.")
+    return ChatOpenAI(
+        api_key=settings.openai_api_key,
+        model=settings.openai_default_model or "gpt-4",
+    )
 
 
 def dump_openai_model(payload: Any) -> dict[str, Any]:
