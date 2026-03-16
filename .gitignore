@@ -67,3 +67,16 @@ dmypy.json
 
 # Ruff stuff:
 .ruff_cache/
+
+# OS
+.DS_Store
+*/.DS_Store
+
+# AI
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.codex/
+.claude/
+.gemini/
+.sisyphus/
