@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+from langchain_openai import ChatOpenAI
 from openai import AsyncOpenAI
 from openai.types.webhooks import UnwrapWebhookEvent
 from pydantic import ValidationError
@@ -35,7 +36,9 @@ from app.constants import (
 from app.database import AsyncSessionLocal, engine
 from app.models import Job, JobEvent
 from app.schemas import BusinessNotifyPayload, SQSJobPayload
-from app.services.llm import dump_openai_model, get_async_client
+from langchain_core.messages import HumanMessage
+
+from app.services.llm import dump_openai_model, get_async_client, get_langchain_client
 from app.services.sqs import build_sqs_client, is_fifo_queue
 
 logger = logging.getLogger(__name__)
@@ -96,6 +99,46 @@ def build_openai_request(
     if "model" not in request_payload and settings.openai_default_model:
         request_payload["model"] = settings.openai_default_model
     return request_payload
+
+
+# NOTE: 프롬프트 빌더
+def build_langchain_request(
+    *, job_id: int, external_request_id: str, payload: dict[str, Any]
+) -> str:
+    # payload는 메인 서버에서 보내는 snake_case JSON 형태
+    context = payload.get("context", {})
+    summary = payload.get("summary", {})
+    metrics = payload.get("metrics", {})
+
+    prompt = f"""
+Analyze the following sprint data and provide insights on sprint performance, potential issues, and recommendations.
+
+Schema Version: {payload.get("schema_version", "unknown")}
+
+Context:
+- Workspace ID: {context.get("workspace_id", "unknown")}
+- Sprint: {context.get("sprint", {}).get("name", "unknown")} (ID: {context.get("sprint", {}).get("id", "unknown")})
+- Period: {context.get("sprint", {}).get("period_days", 0)} days
+- Total Tasks: {context.get("sprint", {}).get("total_tasks_count", 0)}
+
+Summary (Status Snapshot):
+- TODO: {summary.get("status_snapshot", {}).get("todo_count", 0)}
+- In Progress: {summary.get("status_snapshot", {}).get("in_progress_count", 0)}
+- Done: {summary.get("status_snapshot", {}).get("done_count", 0)}
+- Canceled: {summary.get("status_snapshot", {}).get("canceled_count", 0)}
+
+Metrics:
+- Completion: Unassigned Tasks: {metrics.get("completion", {}).get("unassigned_tasks_count", 0)}
+- Stability: Goal Changes: {metrics.get("stability", {}).get("sprint_goal_change_count", 0)}, Period Changes: {metrics.get("stability", {}).get("sprint_period_change_count", 0)}
+- Flow: Rework Events: {metrics.get("flow", {}).get("rework_events_count", 0)}, Direct TODO to Done: {metrics.get("flow", {}).get("todo_to_done_direct_count", 0)}, Scope Churn: {metrics.get("flow", {}).get("scope_churn_events_count", 0)}, Canceled Tasks: {metrics.get("flow", {}).get("canceled_tasks_count", 0)}
+
+Provide a detailed analysis including:
+1. Sprint health assessment
+2. Key performance indicators
+3. Potential risks or issues
+4. Recommendations for improvement
+"""
+    return prompt
 
 
 def compute_next_retry(attempt: int) -> datetime:
@@ -314,7 +357,7 @@ async def _load_or_create_job(
 async def process_sqs_message(
     message: dict[str, Any],
     *,
-    openai_client: AsyncOpenAI | None = None,
+    langchain_client: ChatOpenAI | None = None,
 ) -> bool:
     raw_body = message.get("Body", "")
     try:
@@ -335,22 +378,19 @@ async def process_sqs_message(
     if already_submitted:
         return True
 
-    request_payload = build_openai_request(
+    request_payload = build_langchain_request(
         job_id=job.id,
         external_request_id=job.external_request_id,
         payload=job.openai_request_payload,
     )
 
-    owns_client = openai_client is None
-    client = openai_client or get_async_client()
+    # owns_client = langchain_client is None
+    client = langchain_client or get_langchain_client()
     try:
-        response = await client.responses.create(
-            **request_payload,
-            extra_headers={"Idempotency-Key": job.external_request_id},
-        )
+        response = await client.ainvoke([HumanMessage(content=request_payload)])
     except Exception as exc:
         logger.exception(
-            "OpenAI submission failed for external_request_id=%s",
+            "LangChain invocation failed for external_request_id=%s",
             job.external_request_id,
         )
         async with AsyncSessionLocal() as session:
@@ -364,23 +404,19 @@ async def process_sqs_message(
                 session.add(
                     _append_event(
                         job=persisted_job,
-                        source="openai",
-                        event_type=OPENAI_SUBMIT_FAILED_EVENT,
+                        source="langchain",
+                        event_type="langchain_submit_failed",
                         payload={
-                            "stage": "submit",
+                            "stage": "invoke",
                             "request": request_payload,
                             "error": str(exc),
                         },
                     )
                 )
         return False
-    finally:
-        if owns_client:
-            with suppress(Exception):
-                await client.close()
 
-    response_payload = dump_openai_model(response)
-    openai_state = map_openai_status(response_payload.get("status"))
+    # 성공 처리
+    result_content = response.content if hasattr(response, "content") else str(response)
 
     async with AsyncSessionLocal() as session:
         async with session.begin():
@@ -390,27 +426,29 @@ async def process_sqs_message(
 
             persisted_job.submission_attempts += 1
             persisted_job.submitted_at = utcnow()
-            persisted_job.openai_response_id = response_payload["id"]
-            persisted_job.openai_response_payload = response_payload
-            persisted_job.openai_state = openai_state
+            persisted_job.openai_response_id = (
+                f"langchain-{job.id}-{utcnow().isoformat()}"  # 임의 ID
+            )
+            persisted_job.openai_response_payload = {"result": result_content}
+            persisted_job.openai_state = OPENAI_STATE_COMPLETED
+            persisted_job.result_payload = {"analysis": result_content}
             persisted_job.openai_error = None
             persisted_job.openai_error_payload = None
 
-            if openai_state in TERMINAL_OPENAI_STATES:
-                _apply_openai_terminal_state(
-                    job=persisted_job,
-                    openai_state=openai_state,
-                    occurred_at=utcnow(),
-                    error_message=None,
-                    error_payload=None,
-                )
+            _apply_openai_terminal_state(
+                job=persisted_job,
+                openai_state=OPENAI_STATE_COMPLETED,
+                occurred_at=utcnow(),
+                error_message=None,
+                error_payload=None,
+            )
 
             session.add(
                 _append_event(
                     job=persisted_job,
-                    source="openai",
-                    event_type=OPENAI_SUBMITTED_EVENT,
-                    payload=response_payload,
+                    source="langchain",
+                    event_type="langchain_completed",
+                    payload={"result": result_content},
                 )
             )
     return True
