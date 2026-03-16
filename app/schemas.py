@@ -20,7 +20,7 @@ class BusinessNotifyPayload(BaseModel):
     openai_response_id: str | None
     openai_state: str
     postprocess_state: str
-    result_fetch_status: str
+    # result_fetch_status: str
     result: Any | None = None
     error: dict[str, Any] | None = None
     occurred_at: datetime
