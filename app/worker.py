@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 import httpx
+from langchain_openai import ChatOpenAI
 from openai import AsyncOpenAI
 
 from app.config import Settings, get_settings
@@ -14,7 +15,7 @@ from app.services.job import (
     process_sqs_message,
     recover_job,
 )
-from app.services.llm import get_async_client
+from app.services.llm import get_async_client, get_langchain_client
 from app.services.sqs import build_sqs_client
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ class BackgroundWorkerManager:
         self._postprocess_tasks: set[asyncio.Task[None]] = set()
         self._loop_tasks: list[asyncio.Task[None]] = []
         self._openai_client: AsyncOpenAI | None = None
+        self._langchain_client: ChatOpenAI | None = None
         self._downstream_client: httpx.AsyncClient | None = None
         self._sqs_client: Any | None = None
         self._started = False
@@ -48,6 +50,7 @@ class BackgroundWorkerManager:
             )
 
         self._openai_client = get_async_client()
+        self._langchain_client = get_langchain_client()
         self._downstream_client = httpx.AsyncClient()
         self._sqs_client = build_sqs_client(self.settings)
         self._loop_tasks = [
@@ -213,7 +216,7 @@ class BackgroundWorkerManager:
         try:
             should_delete = await process_sqs_message(
                 message,
-                openai_client=self._openai_client,
+                langchain_client=self._langchain_client,
             )
             if should_delete:
                 await self._delete_message(message["ReceiptHandle"])
