@@ -30,7 +30,8 @@ DB_PASSWORD=$(get_param db-password)
 OPENAI_API_KEY=$(get_param openai-api-key)
 OPENAI_WEBHOOK_SECRET=$(get_param openai-webhook-secret)
 SQS_QUEUE_URL=$(get_param sqs-queue-url)
-BUSINESS_NOTIFY_URL=$(get_param business-notify-url)
+BUSINESS_NOTIFY_SQS_QUEUE_URL=$(get_param business-notify-sqs-queue-url)
+AWS_REGION=$(get_param aws-region)
 ENABLE_INPROCESS_WORKER=true
 DB_AUTO_CREATE_TABLES=true
 EOF
