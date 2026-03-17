@@ -1,12 +1,12 @@
 import asyncio
 import json
 import logging
-from collections.abc import Sequence
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+from langchain_openai import ChatOpenAI
 from openai import AsyncOpenAI
 from openai.types.webhooks import UnwrapWebhookEvent
 from pydantic import ValidationError
@@ -21,9 +21,9 @@ from app.constants import (
     OPENAI_STATE_INCOMPLETE,
     OPENAI_STATE_PENDING,
     OPENAI_STATE_SUBMITTED,
-    POSTPROCESS_STATE_FETCH_FAILED,
-    POSTPROCESS_STATE_FETCH_IN_PROGRESS,
-    POSTPROCESS_STATE_FETCH_PENDING,
+    # POSTPROCESS_STATE_FETCH_FAILED,
+    # POSTPROCESS_STATE_FETCH_IN_PROGRESS,
+    # POSTPROCESS_STATE_FETCH_PENDING,
     POSTPROCESS_STATE_NOT_REQUIRED,
     POSTPROCESS_STATE_NOT_STARTED,
     POSTPROCESS_STATE_NOTIFY_FAILED,
@@ -35,7 +35,9 @@ from app.constants import (
 from app.database import AsyncSessionLocal, engine
 from app.models import Job, JobEvent
 from app.schemas import BusinessNotifyPayload, SQSJobPayload
-from app.services.llm import dump_openai_model, get_async_client
+from langchain_core.messages import HumanMessage
+
+from app.services.llm import dump_openai_model, get_async_client, get_langchain_client
 from app.services.sqs import build_sqs_client, is_fifo_queue
 
 logger = logging.getLogger(__name__)
@@ -98,23 +100,63 @@ def build_openai_request(
     return request_payload
 
 
+# NOTE: 프롬프트 빌더
+def build_langchain_request(
+    *, job_id: int, external_request_id: str, payload: dict[str, Any]
+) -> str:
+    # payload는 메인 서버에서 보내는 snake_case JSON 형태
+    context = payload.get("context", {})
+    summary = payload.get("summary", {})
+    metrics = payload.get("metrics", {})
+
+    prompt = f"""
+Analyze the following sprint data and provide insights on sprint performance, potential issues, and recommendations.
+
+Schema Version: {payload.get("schema_version", "unknown")}
+
+Context:
+- Workspace ID: {context.get("workspace_id", "unknown")}
+- Sprint: {context.get("sprint", {}).get("name", "unknown")} (ID: {context.get("sprint", {}).get("id", "unknown")})
+- Period: {context.get("sprint", {}).get("period_days", 0)} days
+- Total Tasks: {context.get("sprint", {}).get("total_tasks_count", 0)}
+
+Summary (Status Snapshot):
+- TODO: {summary.get("status_snapshot", {}).get("todo_count", 0)}
+- In Progress: {summary.get("status_snapshot", {}).get("in_progress_count", 0)}
+- Done: {summary.get("status_snapshot", {}).get("done_count", 0)}
+- Canceled: {summary.get("status_snapshot", {}).get("canceled_count", 0)}
+
+Metrics:
+- Completion: Unassigned Tasks: {metrics.get("completion", {}).get("unassigned_tasks_count", 0)}
+- Stability: Goal Changes: {metrics.get("stability", {}).get("sprint_goal_change_count", 0)}, Period Changes: {metrics.get("stability", {}).get("sprint_period_change_count", 0)}
+- Flow: Rework Events: {metrics.get("flow", {}).get("rework_events_count", 0)}, Direct TODO to Done: {metrics.get("flow", {}).get("todo_to_done_direct_count", 0)}, Scope Churn: {metrics.get("flow", {}).get("scope_churn_events_count", 0)}, Canceled Tasks: {metrics.get("flow", {}).get("canceled_tasks_count", 0)}
+
+Provide a detailed analysis including:
+1. Sprint health assessment
+2. Key performance indicators
+3. Potential risks or issues
+4. Recommendations for improvement
+"""
+    return prompt
+
+
 def compute_next_retry(attempt: int) -> datetime:
     delay_seconds = min(300, 2 ** min(attempt, 8))
     return utcnow() + timedelta(seconds=delay_seconds)
 
 
-def result_fetch_status_for_job(job: Job) -> str:
-    if job.result_fetched_at is not None or job.result_payload is not None:
-        return "succeeded"
-    if job.openai_state != OPENAI_STATE_COMPLETED:
-        return "skipped"
-    if job.postprocess_state in {
-        POSTPROCESS_STATE_FETCH_PENDING,
-        POSTPROCESS_STATE_FETCH_IN_PROGRESS,
-        POSTPROCESS_STATE_FETCH_FAILED,
-    }:
-        return "pending"
-    return "not_started"
+# def result_fetch_status_for_job(job: Job) -> str:
+#     if job.result_fetched_at is not None or job.result_payload is not None:
+#         return "succeeded"
+#     if job.openai_state != OPENAI_STATE_COMPLETED:
+#         return "skipped"
+#     if job.postprocess_state in {
+#         POSTPROCESS_STATE_FETCH_PENDING,
+#         POSTPROCESS_STATE_FETCH_IN_PROGRESS,
+#         POSTPROCESS_STATE_FETCH_FAILED,
+#     }:
+#         return "pending"
+#     return "not_started"
 
 
 def build_notify_error(job: Job) -> dict[str, Any] | None:
@@ -140,7 +182,7 @@ def build_notify_payload(job: Job) -> BusinessNotifyPayload:
         openai_response_id=job.openai_response_id,
         openai_state=job.openai_state,
         postprocess_state=job.postprocess_state,
-        result_fetch_status=result_fetch_status_for_job(job),
+        # result_fetch_status=result_fetch_status_for_job(job),
         result=job.result_payload,
         error=build_notify_error(job),
         occurred_at=utcnow(),
@@ -224,7 +266,8 @@ def _apply_openai_terminal_state(
     job.openai_error_payload = error_payload
 
     if openai_state == OPENAI_STATE_COMPLETED:
-        job.postprocess_state = POSTPROCESS_STATE_FETCH_PENDING
+        # job.postprocess_state = POSTPROCESS_STATE_FETCH_PENDING
+        job.postprocess_state = POSTPROCESS_STATE_NOTIFY_PENDING
         job.next_retry_at = utcnow()
         return
 
@@ -314,7 +357,7 @@ async def _load_or_create_job(
 async def process_sqs_message(
     message: dict[str, Any],
     *,
-    openai_client: AsyncOpenAI | None = None,
+    langchain_client: ChatOpenAI | None = None,
 ) -> bool:
     raw_body = message.get("Body", "")
     try:
@@ -335,22 +378,19 @@ async def process_sqs_message(
     if already_submitted:
         return True
 
-    request_payload = build_openai_request(
+    request_payload = build_langchain_request(
         job_id=job.id,
         external_request_id=job.external_request_id,
         payload=job.openai_request_payload,
     )
 
-    owns_client = openai_client is None
-    client = openai_client or get_async_client()
+    # owns_client = langchain_client is None
+    client = langchain_client or get_langchain_client()
     try:
-        response = await client.responses.create(
-            **request_payload,
-            extra_headers={"Idempotency-Key": job.external_request_id},
-        )
+        response = await client.ainvoke([HumanMessage(content=request_payload)])
     except Exception as exc:
         logger.exception(
-            "OpenAI submission failed for external_request_id=%s",
+            "LangChain invocation failed for external_request_id=%s",
             job.external_request_id,
         )
         async with AsyncSessionLocal() as session:
@@ -364,23 +404,19 @@ async def process_sqs_message(
                 session.add(
                     _append_event(
                         job=persisted_job,
-                        source="openai",
-                        event_type=OPENAI_SUBMIT_FAILED_EVENT,
+                        source="langchain",
+                        event_type="langchain_submit_failed",
                         payload={
-                            "stage": "submit",
+                            "stage": "invoke",
                             "request": request_payload,
                             "error": str(exc),
                         },
                     )
                 )
         return False
-    finally:
-        if owns_client:
-            with suppress(Exception):
-                await client.close()
 
-    response_payload = dump_openai_model(response)
-    openai_state = map_openai_status(response_payload.get("status"))
+    # 성공 처리
+    result_content = response.content if hasattr(response, "content") else str(response)
 
     async with AsyncSessionLocal() as session:
         async with session.begin():
@@ -390,27 +426,29 @@ async def process_sqs_message(
 
             persisted_job.submission_attempts += 1
             persisted_job.submitted_at = utcnow()
-            persisted_job.openai_response_id = response_payload["id"]
-            persisted_job.openai_response_payload = response_payload
-            persisted_job.openai_state = openai_state
+            persisted_job.openai_response_id = (
+                f"langchain-{job.id}-{utcnow().isoformat()}"  # 임의 ID
+            )
+            persisted_job.openai_response_payload = {"result": result_content}
+            persisted_job.openai_state = OPENAI_STATE_COMPLETED
+            persisted_job.result_payload = {"analysis": result_content}
             persisted_job.openai_error = None
             persisted_job.openai_error_payload = None
 
-            if openai_state in TERMINAL_OPENAI_STATES:
-                _apply_openai_terminal_state(
-                    job=persisted_job,
-                    openai_state=openai_state,
-                    occurred_at=utcnow(),
-                    error_message=None,
-                    error_payload=None,
-                )
+            _apply_openai_terminal_state(
+                job=persisted_job,
+                openai_state=OPENAI_STATE_COMPLETED,
+                occurred_at=utcnow(),
+                error_message=None,
+                error_payload=None,
+            )
 
             session.add(
                 _append_event(
                     job=persisted_job,
-                    source="openai",
-                    event_type=OPENAI_SUBMITTED_EVENT,
-                    payload=response_payload,
+                    source="langchain",
+                    event_type="langchain_completed",
+                    payload={"result": result_content},
                 )
             )
     return True
@@ -543,6 +581,7 @@ async def _claim_recovery_jobs(limit: int) -> list[int]:
             return [job.id for job in jobs]
 
 
+"""
 async def _fetch_result_payload(
     job_id: int,
     *,
@@ -631,6 +670,7 @@ async def _fetch_result_payload(
                     },
                 )
             )
+"""
 
 
 async def _notify_job(
@@ -641,8 +681,13 @@ async def _notify_job(
 ) -> None:
     async with AsyncSessionLocal() as session:
         job = await session.get(Job, job_id)
+        print(f"🔔 Notifying downstream for job_id={job_id}")
     if job is None:
+        print(f"⚠️ Job not found for job_id={job_id}")
         return
+    print(
+        f"📋 Job details: openai_state={job.openai_state} postprocess_state={job.postprocess_state} notify_attempts={job.notify_attempts}"
+    )
 
     settings = get_settings()
     transport, target = resolve_notify_target(settings)
@@ -668,6 +713,7 @@ async def _notify_job(
 
     try:
         if transport == "sqs":
+            print(f"📤 Sending completion notification to SQS for job_id={job_id}")
             request = build_notify_sqs_request(
                 job=job,
                 queue_url=target,
@@ -689,6 +735,10 @@ async def _notify_job(
                 "payload": notify_payload,
                 "message_id": response.get("MessageId"),
             }
+            logger.info(
+                "✅ Successfully sent completion notification to SQS for job_id={}",
+                job_id,
+            )
         else:
             headers: dict[str, str] = {}
             if (
@@ -714,6 +764,11 @@ async def _notify_job(
                     await client.aclose()
             success_payload = {**destination_payload, "payload": notify_payload}
     except Exception as exc:
+        logger.error(
+            "❌ Failed to send completion notification to SQS for job_id={}",
+            job_id,
+            exc_info=exc,
+        )
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 persisted_job = await session.get(Job, job_id)
@@ -768,31 +823,34 @@ async def claim_due_postprocess_work(limit: int) -> list[tuple[str, int]]:
     if limit <= 0:
         return []
 
-    fetch_job_ids = await _claim_jobs_for_stage(
+    # fetch_job_ids = await _claim_jobs_for_stage(
+    #     eligible_states=(
+    #         POSTPROCESS_STATE_FETCH_PENDING,
+    #         POSTPROCESS_STATE_FETCH_FAILED,
+    #         POSTPROCESS_STATE_FETCH_IN_PROGRESS,
+    #     ),
+    #     in_progress_state=POSTPROCESS_STATE_FETCH_IN_PROGRESS,
+    #     limit=limit,
+    # )
+    # remaining = limit - len(fetch_job_ids)
+    # notify_job_ids: Sequence[int] = []
+    # if remaining > 0:
+    notify_job_ids = await _claim_jobs_for_stage(
         eligible_states=(
-            POSTPROCESS_STATE_FETCH_PENDING,
-            POSTPROCESS_STATE_FETCH_FAILED,
-            POSTPROCESS_STATE_FETCH_IN_PROGRESS,
+            POSTPROCESS_STATE_NOTIFY_PENDING,
+            POSTPROCESS_STATE_NOTIFY_FAILED,
+            POSTPROCESS_STATE_NOTIFY_IN_PROGRESS,
         ),
-        in_progress_state=POSTPROCESS_STATE_FETCH_IN_PROGRESS,
+        in_progress_state=POSTPROCESS_STATE_NOTIFY_IN_PROGRESS,
+        # limit=remaining,
         limit=limit,
     )
-    remaining = limit - len(fetch_job_ids)
-    notify_job_ids: Sequence[int] = []
-    if remaining > 0:
-        notify_job_ids = await _claim_jobs_for_stage(
-            eligible_states=(
-                POSTPROCESS_STATE_NOTIFY_PENDING,
-                POSTPROCESS_STATE_NOTIFY_FAILED,
-                POSTPROCESS_STATE_NOTIFY_IN_PROGRESS,
-            ),
-            in_progress_state=POSTPROCESS_STATE_NOTIFY_IN_PROGRESS,
-            limit=remaining,
-        )
 
-    return [("fetch", job_id) for job_id in fetch_job_ids] + [
-        ("notify", job_id) for job_id in notify_job_ids
-    ]
+    # return [("fetch", job_id) for job_id in fetch_job_ids] + [
+    #     ("notify", job_id) for job_id in notify_job_ids
+    # ]
+
+    return [("notify", job_id) for job_id in notify_job_ids]
 
 
 async def process_postprocess_work(
@@ -802,10 +860,12 @@ async def process_postprocess_work(
     downstream_client: httpx.AsyncClient | None = None,
     sqs_client: Any | None = None,
 ) -> None:
-    if work_kind == "fetch":
-        await _fetch_result_payload(job_id, downstream_client=downstream_client)
-        return
+    # if work_kind == "fetch":
+    #     print(f"📥 Processing result fetch work for job_id={job_id}")
+    #     await _fetch_result_payload(job_id, downstream_client=downstream_client)
+    #     return
     if work_kind == "notify":
+        print(f"🚀 Processing notify work for job_id={job_id}")
         await _notify_job(
             job_id,
             downstream_client=downstream_client,
