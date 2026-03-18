@@ -35,7 +35,7 @@ from app.constants import (
 from app.database import AsyncSessionLocal, engine
 from app.models import Job, JobEvent
 from app.schemas import BusinessNotifyPayload, SQSJobPayload
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.services.llm import dump_openai_model, get_async_client, get_langchain_client
 from app.services.sqs import build_sqs_client, is_fifo_queue
@@ -387,7 +387,10 @@ async def process_sqs_message(
     # owns_client = langchain_client is None
     client = langchain_client or get_langchain_client()
     try:
-        response = await client.ainvoke([HumanMessage(content=request_payload)])
+        response = await client.ainvoke([
+            SystemMessage(content="You are a helpful assistant. Always respond in the same language as the user's input."),
+            HumanMessage(content=request_payload),
+        ])
     except Exception as exc:
         logger.exception(
             "LangChain invocation failed for external_request_id=%s",
