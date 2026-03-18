@@ -387,10 +387,14 @@ async def process_sqs_message(
     # owns_client = langchain_client is None
     client = langchain_client or get_langchain_client()
     try:
-        response = await client.ainvoke([
-            SystemMessage(content="You are a helpful assistant. Always respond in the same language as the user's input."),
-            HumanMessage(content=request_payload),
-        ])
+        response = await client.ainvoke(
+            [
+                SystemMessage(
+                    content="You are a helpful assistant. Always respond in the same language as the user's input."
+                ),
+                HumanMessage(content=request_payload),
+            ]
+        )
     except Exception as exc:
         logger.exception(
             "LangChain invocation failed for external_request_id=%s",
