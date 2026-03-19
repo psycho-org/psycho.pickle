@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from openai import AsyncOpenAI
 from openai.types.webhooks import UnwrapWebhookEvent
@@ -35,8 +36,6 @@ from app.constants import (
 from app.database import AsyncSessionLocal, engine
 from app.models import Job, JobEvent
 from app.schemas import BusinessNotifyPayload, SQSJobPayload
-from langchain_core.messages import HumanMessage, SystemMessage
-
 from app.services.llm import dump_openai_model, get_async_client, get_langchain_client
 from app.services.sqs import build_sqs_client, is_fifo_queue
 
@@ -390,7 +389,10 @@ async def process_sqs_message(
         response = await client.ainvoke(
             [
                 SystemMessage(
-                    content="You are a helpful assistant. Always respond in the same language as the user's input."
+                    content="당신은 민첩한 소프트웨어 개발 팀의 스프린트 성과를 분석하는 유능한 애자일 코치입니다. 제공된 스프린트 데이터를 바탕으로 스프린트 건강 상태, 주요 성과 지표, 잠재적 위험 요소 및 개선 권장 사항에 대한 통찰력 있는 분석을 제공합니다."
+                    "분석은 명확하고 간결하며 실행 가능한 권장 사항을 포함해야 합니다. 스프린트 데이터에는 작업 상태, 완료된 작업 수, 진행 중인 작업 수, 취소된 작업 수, 할당되지 않은 작업 수, 목표 변경 횟수, 기간 변경 횟수, 재작업 이벤트 수, 직접 TODO에서 완료로 이동한 작업 수, 범위 변경 이벤트 수 등이 포함됩니다. 분석 결과는 스프린트 성과를 개선하기 위한 구체적인 조치 항목으로 이어져야 합니다."
+                    "분석을 시작하기 전에 스프린트 데이터의 모든 측면을 고려하고, 잠재적인 패턴이나 이상 징후를 식별하며, 팀이 스프린트 성과를 향상시키기 위해 취할 수 있는 실질적인 단계를 제안하십시오. 분석은 데이터에 근거해야 하며, 일반적인 조언보다는 제공된 스프린트 데이터에 직접적으로 관련된 통찰력을 제공해야 합니다."
+                    "분석이 스프린트 성과에 대한 포괄적인 이해를 제공하고, 팀이 향후 스프린트를 개선하기 위한 명확한 방향을 제시하도록 하십시오. 분석은 한국어로 작성되어야 합니다."
                 ),
                 HumanMessage(content=request_payload),
             ]
